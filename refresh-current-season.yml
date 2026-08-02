@@ -1,0 +1,30 @@
+name: Refresh current-season data
+
+on:
+  schedule:
+    # 10:00 UTC ≈ 6am ET, well after the last game of any given night has
+    # finished and MoneyPuck has run its own nightly update.
+    - cron: "0 10 * * *"
+  workflow_dispatch: {}   # allows manual "Run workflow" from the Actions tab
+
+permissions:
+  contents: write   # needed for `gh release upload` / `gh release delete-asset`
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pandas pyarrow requests
+
+      - name: Refresh current-season files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MPDATA_REPO: ${{ github.repository }}
+        run: python scripts/refresh_current_season.py
