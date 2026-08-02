@@ -101,21 +101,91 @@ _OVERSIZED_ID_COLS = ["lineId"]
 # --------------------------------------------------------------------------- #
 # Fetch + convert
 # --------------------------------------------------------------------------- #
+# Some MoneyPuck endpoints (notably the large career-level all_teams.csv)
+# will serve an HTML error/challenge page instead of the file to a bare
+# python-requests client. Present as a normal browser and stream to disk so
+# large files don't have to be held in memory twice.
+_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "text/csv,application/octet-stream,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+_RETRIES = 3
+
+
+def _download_to_disk(url: str, dest: str) -> str:
+    """Stream a URL to dest, retrying transient failures. Raises with a
+    readable diagnosis if the server returns HTML instead of data."""
+    last_err = None
+    for attempt in range(1, _RETRIES + 1):
+        try:
+            with requests.get(url, headers=_HEADERS, timeout=600,
+                              stream=True) as r:
+                r.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        if chunk:
+                            f.write(chunk)
+            break
+        except Exception as e:      # noqa: BLE001 - retry anything transient
+            last_err = e
+            print(f"    attempt {attempt}/{_RETRIES} failed: {e}")
+            if attempt == _RETRIES:
+                raise
+    else:                                            # pragma: no cover
+        raise last_err                               # pragma: no cover
+
+    with open(dest, "rb") as f:
+        head = f.read(400)
+
+    size_mb = os.path.getsize(dest) / 1e6
+    # gzip magic -- some servers return a gzipped body without signalling it
+    if head[:2] == b"\x1f\x8b":
+        print(f"    (gzipped response, {size_mb:.1f} MB -- will decompress)")
+        return dest
+    stripped = head.lstrip()[:200].lower()
+    if stripped.startswith(b"<") or b"<html" in stripped:
+        preview = head[:200].decode("utf-8", "replace").replace("\n", " ")
+        raise ValueError(
+            f"Server returned HTML, not CSV ({size_mb:.2f} MB). "
+            f"First bytes: {preview!r}"
+        )
+    return dest
+
+
+def _read_csv_smart(path: str) -> pd.DataFrame:
+    """Read a CSV from disk, transparently handling a gzipped body."""
+    with open(path, "rb") as f:
+        magic = f.read(2)
+    compression = "gzip" if magic == b"\x1f\x8b" else "infer"
+    return pd.read_csv(path, low_memory=False, compression=compression)
+
+
 def _fetch_csv(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=120)
-    r.raise_for_status()
-    return pd.read_csv(io.BytesIO(r.content), low_memory=False)
+    tmp = os.path.join(WORKDIR, "_raw_download.csv")
+    _download_to_disk(url, tmp)
+    try:
+        return _read_csv_smart(tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def _fetch_zipped_csv(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=120)
-    r.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-        names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        if not names:
-            raise FileNotFoundError(f"No CSV found inside zip from {url}")
-        with zf.open(names[0]) as f:
-            return pd.read_csv(f, low_memory=False)
+    tmp = os.path.join(WORKDIR, "_raw_download.zip")
+    _download_to_disk(url, tmp)
+    try:
+        with zipfile.ZipFile(tmp) as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if not names:
+                raise FileNotFoundError(f"No CSV found inside zip from {url}")
+            with zf.open(names[0]) as f:
+                return pd.read_csv(f, low_memory=False)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def fetch_and_convert(dest_name: str, spec: dict) -> str:
