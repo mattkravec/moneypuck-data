@@ -28,14 +28,17 @@ reads about 14x faster via column pushdown — a 4-column read of a shots file i
 
 | Asset | Coverage | Refreshed |
 | --- | --- | --- |
-| `shots_2007.parquet` … `shots_2025.parquet` | one file per season, per shot attempt | current season only |
-| `skaters_2008_to_2024.parquet`, `skaters_2025.parquet` | per-skater season totals | current season only |
-| `goalies_2008_to_2024.parquet`, `goalies_2025.parquet` | per-goalie season totals | current season only |
-| `lines_2008_to_2024.parquet`, `lines_2025.parquet` | line combinations (5on5 only) | current season only |
-| `teams_2008_to_2024.parquet`, `teams_2025.parquet` | per-team season totals | current season only |
-| `all_teams_2008_to2025.parquet` | game-by-game team logs, all seasons | nightly |
+| `shots_2007.parquet` … `shots_2026.parquet` | one file per season, per shot attempt | current season only |
+| `skaters_2008_to_2024.parquet`, `skaters_2025.parquet`, `skaters_2026.parquet` | per-skater season totals | current season only |
+| `goalies_2008_to_2024.parquet`, `goalies_2025.parquet`, `goalies_2026.parquet` | per-goalie season totals | current season only |
+| `lines_2008_to_2024.parquet`, `lines_2025.parquet`, `lines_2026.parquet` | line combinations (5on5 only) | current season only |
+| `teams_2008_to_2024.parquet`, `teams_2025.parquet`, `teams_2026.parquet` | per-team season totals | current season only |
+| `all_teams_2008_to2026.parquet` | game-by-game team logs, all seasons | nightly |
 
-Seasons are labeled by **start year**: `2025` is the 2025-26 season.
+Seasons are labeled by **start year**: `2026` is the 2026-27 season (current).
+Finished seasons after 2024 stay as frozen single-season files
+(`skaters_2025.parquet` = final 2025-26) rather than being folded into the
+`_2008_to_2024` files, so historical asset names never change.
 
 Asset names are stable and the refresh overwrites in place, so download URLs
 never change:
@@ -69,8 +72,8 @@ the failure is visible.
 Only these six files change mid-season:
 
 ```
-skaters_2025  goalies_2025  lines_2025  teams_2025  shots_2025
-all_teams_2008_to2025
+skaters_2026  goalies_2026  lines_2026  teams_2026  shots_2026
+all_teams_2008_to2026
 ```
 
 The multi-season historical files are closed once a season ends and are never
@@ -94,11 +97,12 @@ Once per year, when the new season starts — the nightly job will otherwise kee
 succeeding while refreshing a finished season, and a green check won't warn you.
 
 1. In `scripts/refresh_current_season.py`, bump the `MPDATA_CURRENT_SEASON`
-   default and rename the `_2025` entries in `CURRENT_SEASON_FILES` and
-   `SOURCES` to the new year.
-2. Convert the season that just ended and fold it into the historical
-   multi-season files; add a `shots_<year>.parquet` for the new season.
-3. Update `CURRENT_SEASON_FILES` in the skill's `mpdata.py` to match.
+   default. Every asset name and source URL is derived from it.
+2. Run the workflow manually (Actions → Run workflow). It creates the new
+   `*_<year>.parquet` files and replaces `all_teams_2008_to<year-1>` with
+   `all_teams_2008_to<year>`. The previous season's single-season files are
+   left in place as the frozen final copy; nothing needs folding.
+3. Update the season year in the skill's `mpdata.py` file list to match.
 
 No new release tag is needed unless the naming convention itself changes.
 
@@ -109,7 +113,7 @@ Via the skill:
 ```python
 import mpdata
 mpdata.refresh_current_season()      # pull today's refresh (6 files, not 380 MB)
-sk = mpdata.load_skaters(seasons=2025)
+sk = mpdata.load_skaters(seasons=2026)
 ```
 
 Or directly:
@@ -117,8 +121,8 @@ Or directly:
 ```python
 import pandas as pd
 BASE = "https://github.com/mattkravec/moneypuck-data/releases/download/data-v2"
-sk = pd.read_parquet(f"{BASE}/skaters_2025.parquet")
-sh = pd.read_parquet(f"{BASE}/shots_2025.parquet",
+sk = pd.read_parquet(f"{BASE}/skaters_2026.parquet")
+sh = pd.read_parquet(f"{BASE}/shots_2026.parquet",
                      columns=["shooterName", "xGoal", "goal", "isPlayoffGame"])
 ```
 

@@ -45,53 +45,43 @@ LIVE_TAG = os.environ.get("MPDATA_LIVE_TAG", "data-v2")
 BACKUP_TAG = os.environ.get("MPDATA_BACKUP_TAG", "data-v2-backups")
 BACKUP_RETENTION_DAYS = int(os.environ.get("MPDATA_BACKUP_RETENTION_DAYS", "7"))
 
-# season is labeled by its START year -- 2025 == the 2025-26 season.
-# Bump this once a year when the new season starts; it does NOT change
-# mid-season.
-CURRENT_SEASON = int(os.environ.get("MPDATA_CURRENT_SEASON", "2025"))
+# season is labeled by its START year -- 2026 == the 2026-27 season.
+# This is the ONLY value to change at the annual rollover; every asset name
+# and source URL below is derived from it. It does NOT change mid-season.
+CURRENT_SEASON = int(os.environ.get("MPDATA_CURRENT_SEASON", "2026"))
+_S = CURRENT_SEASON
 
 WORKDIR = "mp_refresh_tmp"
 
-# The six files whose *content* changes mid-season. Filenames here are the
-# release asset names (what mpdata.py's CURRENT_SEASON_FILES expects).
-CURRENT_SEASON_FILES = [
-    "skaters_2025.parquet",
-    "goalies_2025.parquet",
-    "lines_2025.parquet",
-    "teams_2025.parquet",
-    "shots_2025.parquet",
-    "all_teams_2008_to2025.parquet",
-]
+# The cumulative game log is named for the latest season it covers. At
+# rollover the previous year's copy is retired from the live release (it is a
+# strict subset of the new one, and leaving both would double-count in any
+# loader that globs all_teams_*).
+ALL_TEAMS_NAME = f"all_teams_2008_to{_S}.parquet"
+PREV_ALL_TEAMS_NAME = f"all_teams_2008_to{_S - 1}.parquet"
 
-# Where each one comes from on MoneyPuck. seasonSummary files are plain CSV;
-# shots ships zipped; the game log is a single cumulative CSV covering every
-# season (not just the current one).
+# Where each mid-season file comes from on MoneyPuck. seasonSummary files are
+# plain CSV; shots ships zipped; the game log is a single cumulative CSV
+# covering every season (not just the current one). Keys are the release
+# asset names.
+_SUMMARY = f"https://moneypuck.com/moneypuck/playerData/seasonSummary/{_S}/regular"
 SOURCES = {
-    "skaters_2025.parquet": {
-        "url": f"https://moneypuck.com/moneypuck/playerData/seasonSummary/{CURRENT_SEASON}/regular/skaters.csv",
-        "kind": "csv",
-    },
-    "goalies_2025.parquet": {
-        "url": f"https://moneypuck.com/moneypuck/playerData/seasonSummary/{CURRENT_SEASON}/regular/goalies.csv",
-        "kind": "csv",
-    },
-    "lines_2025.parquet": {
-        "url": f"https://moneypuck.com/moneypuck/playerData/seasonSummary/{CURRENT_SEASON}/regular/lines.csv",
-        "kind": "csv",
-    },
-    "teams_2025.parquet": {
-        "url": f"https://moneypuck.com/moneypuck/playerData/seasonSummary/{CURRENT_SEASON}/regular/teams.csv",
-        "kind": "csv",
-    },
-    "shots_2025.parquet": {
-        "url": f"https://peter-tanner.com/moneypuck/downloads/shots_{CURRENT_SEASON}.zip",
+    f"skaters_{_S}.parquet": {"url": f"{_SUMMARY}/skaters.csv", "kind": "csv"},
+    f"goalies_{_S}.parquet": {"url": f"{_SUMMARY}/goalies.csv", "kind": "csv"},
+    f"lines_{_S}.parquet":   {"url": f"{_SUMMARY}/lines.csv",   "kind": "csv"},
+    f"teams_{_S}.parquet":   {"url": f"{_SUMMARY}/teams.csv",   "kind": "csv"},
+    f"shots_{_S}.parquet": {
+        "url": f"https://peter-tanner.com/moneypuck/downloads/shots_{_S}.zip",
         "kind": "zip",
     },
-    "all_teams_2008_to2025.parquet": {
+    ALL_TEAMS_NAME: {
         "url": "https://moneypuck.com/moneypuck/playerData/careers/gameByGame/all_teams.csv",
         "kind": "csv",
     },
 }
+
+# The six files whose *content* changes mid-season (what gets backed up).
+CURRENT_SEASON_FILES = list(SOURCES)
 
 # Columns known to overflow int64 when MoneyPuck concatenates player IDs.
 # Cast to str wherever present, matching the original historical conversion.
@@ -268,7 +258,7 @@ def prune_old_backups() -> None:
     cutoff = datetime.now().date() - timedelta(days=BACKUP_RETENTION_DAYS)
     for a in assets:
         name = a["name"]
-        # dated names look like "skaters_2025__2026-08-01.parquet"
+        # dated names look like "skaters_2026__2026-10-01.parquet"
         try:
             date_part = name.rsplit("__", 1)[1].rsplit(".", 1)[0]
             asset_date = date.fromisoformat(date_part)
@@ -283,6 +273,23 @@ def prune_old_backups() -> None:
 def upload_live(paths: list[str]) -> None:
     print(f"uploading {len(paths)} refreshed files to {LIVE_TAG}")
     _gh("release", "upload", LIVE_TAG, *paths, "-R", REPO, "--clobber")
+
+
+def retire_previous_game_log() -> None:
+    """After a season rollover, drop last year's cumulative game log from the
+    live release. Only called once the new one has uploaded, and it's a strict
+    subset of the new file, so nothing is lost. No-op on every other night."""
+    r = _gh("release", "view", LIVE_TAG, "-R", REPO, "--json", "assets",
+            check=False)
+    if r.returncode != 0:
+        return
+    import json
+    names = {a["name"] for a in json.loads(r.stdout).get("assets", [])}
+    if PREV_ALL_TEAMS_NAME in names and ALL_TEAMS_NAME in names:
+        print(f"  retiring {PREV_ALL_TEAMS_NAME} (superseded by "
+              f"{ALL_TEAMS_NAME})")
+        _gh("release", "delete-asset", LIVE_TAG, PREV_ALL_TEAMS_NAME,
+            "-R", REPO, "--yes", check=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,6 +319,8 @@ def main() -> None:
 
     print(f"[3/3] uploading {len(fresh_paths)}/{len(SOURCES)} files")
     upload_live(fresh_paths)
+    if ALL_TEAMS_NAME not in failures:
+        retire_previous_game_log()
 
     if failures:
         print(f"Completed with {len(failures)} failure(s): {failures}",
